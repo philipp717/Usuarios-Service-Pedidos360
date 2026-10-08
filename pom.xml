@@ -74,6 +74,13 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Pruebas unitarias con JUnit 5 y Mockito -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
