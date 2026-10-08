@@ -1,6 +1,6 @@
 # Usuarios Service - Pedidos360
 
-Microservicio encargado de la gestión de usuarios de la plataforma Pedidos360. Está desarrollado con Spring Boot y expone una API REST protegida mediante tokens JWT emitidos por Microsoft Entra ID.
+Microservicio encargado de la gestión de usuarios de la plataforma Pedidos360. Está desarrollado con Spring Boot, expone una API REST protegida mediante JWT de Microsoft Entra ID y consume eventos de pedidos mediante RabbitMQ.
 
 ## Descripción general
 
@@ -13,14 +13,18 @@ Sus principales responsabilidades son:
 - validar el issuer y audience de los tokens emitidos por Microsoft Entra ID;
 - requerir el scope `access_as_user` para acceder a las rutas protegidas;
 - persistir la información mediante Spring Data JPA y MySQL;
-- exponer un endpoint de health check mediante Spring Boot Actuator.
+- exponer un endpoint de health check mediante Spring Boot Actuator;
+- consumir eventos `PedidoCreadoEvent` publicados mediante RabbitMQ;
+- confirmar mensajes válidos con ACK y rechazar eventos inválidos con NACK para su envío a una Dead Letter Queue (DLQ).
 
 ## Arquitectura
 
 Pedidos360 está compuesto principalmente por:
 
 - **Frontend Angular:** interfaz de usuario y autenticación mediante MSAL.
-- **Pedidos Service:** gestión de pedidos.
+- **Pedidos Service:** gestión de pedidos y publicación de eventos.
+- **RabbitMQ:** intermediario para la comunicación asíncrona entre microservicios.
+- **RabbitMQ Admin Service:** administración de colas, exchanges, bindings y mensajes fallidos.
 - **Usuarios Service:** gestión de usuarios e información del usuario autenticado.
 - **Microsoft Entra ID:** autenticación y emisión de tokens JWT.
 - **AWS API Gateway:** punto de entrada utilizado por el frontend para acceder a los microservicios en el entorno desplegado.
@@ -34,7 +38,7 @@ En desarrollo local, Usuarios Service se ejecuta en el puerto `8081`.
 2. El frontend solicita un access token con el scope `access_as_user`.
 3. `MsalInterceptor` incorpora el token en las solicitudes protegidas utilizando el encabezado:
 
-```http
+```
 Authorization: Bearer <access-token>
 ```
 
@@ -59,10 +63,12 @@ Authorization: Bearer <access-token>
 - Spring Data JPA
 - MySQL
 - Spring Boot Actuator
+- Spring AMQP / RabbitMQ
+- JUnit 5 y Mockito (pruebas unitarias)
 
 ## Estructura del proyecto
 
-```text
+```
 Usuarios-Service-Pedidos360/
 ├── src/
 │   ├── main/
@@ -72,7 +78,12 @@ Usuarios-Service-Pedidos360/
 │   │   │           └── pedidos360/
 │   │   │               └── usuarios/
 │   │   │                   ├── config/
-│   │   │                   │   └── SecurityConfig.java
+│   │   │                   │   ├── SecurityConfig.java
+│   │   │                   │   └── RabbitUsuariosConfig.java
+│   │   │                   ├── consumer/
+│   │   │                   │   └── PedidoCreadoListener.java
+│   │   │                   ├── messaging/
+│   │   │                   │   └── dto/PedidoCreadoEvent.java
 │   │   │                   ├── controller/
 │   │   │                   │   └── UsuarioController.java
 │   │   │                   ├── model/
@@ -86,11 +97,14 @@ Usuarios-Service-Pedidos360/
 │   │   └── resources/
 │   │       └── application.properties
 │   └── test/
+│       └── java/cl/duoc/pedidos360/usuarios/consumer/
+│           └── PedidoCreadoListenerTest.java
 ├── .gitignore
 ├── mvnw
 ├── mvnw.cmd
 ├── pom.xml
 └── README.md
+
 ```
 
 ## Modelo de usuario
@@ -99,7 +113,7 @@ La entidad `Usuario` representa a los usuarios almacenados por el servicio.
 
 Sus principales atributos son:
 
-```json
+```
 {
   "id": 1,
   "entraObjectId": "11111111-1111-1111-1111-111111111111",
@@ -119,21 +133,23 @@ Usuarios Service utiliza Spring Data JPA y MySQL para la persistencia de usuario
 
 La entidad `Usuario` está asociada a la tabla:
 
-```text
+```
 usuarios
+
 ```
 
 El acceso a los datos se realiza mediante `UsuarioRepository`.
 
 La configuración de conexión se encuentra en:
 
-```text
+```
 src/main/resources/application.properties
+
 ```
 
 Las credenciales y parámetros de conexión se reciben mediante variables de entorno:
 
-```properties
+```
 spring.datasource.url=jdbc:mysql://${DB_HOST}:${DB_PORT:3306}/${DB_NAME}?useSSL=true&serverTimezone=UTC
 spring.datasource.username=${DB_USER}
 spring.datasource.password=${DB_PASSWORD}
@@ -142,14 +158,14 @@ spring.datasource.password=${DB_PASSWORD}
 Las variables necesarias son:
 
 - `DB_HOST`: host del servidor MySQL.
-- `DB_PORT`: puerto de MySQL. 
+- `DB_PORT`: puerto de MySQL.
 - `DB_NAME`: nombre de la base de datos.
 - `DB_USER`: usuario de conexión.
 - `DB_PASSWORD`: contraseña de conexión.
 
 Además, JPA está configurado mediante:
 
-```properties
+```
 spring.jpa.hibernate.ddl-auto=update
 spring.jpa.show-sql=true
 ```
@@ -171,22 +187,23 @@ El servicio utiliza `UsuarioRepository` para almacenar y recuperar información 
 
 La API está montada bajo el prefijo:
 
-```text
+```
 /api/usuarios
+
 ```
 
 Todas las rutas bajo `/api/**` requieren un JWT válido con el scope `access_as_user`.
 
 ### 1. Listar usuarios
 
-```http
+```
 GET /api/usuarios
 Authorization: Bearer <access-token>
 ```
 
 Respuesta esperada:
 
-```json
+```
 [
   {
     "id": 1,
@@ -202,7 +219,7 @@ Respuesta esperada:
 
 ### 2. Obtener perfil del usuario autenticado
 
-```http
+```
 GET /api/usuarios/me
 Authorization: Bearer <access-token>
 ```
@@ -211,7 +228,7 @@ Este endpoint obtiene la información directamente desde los claims contenidos e
 
 Ejemplo de respuesta:
 
-```json
+```
 {
   "objectId": "<oid>",
   "nombre": "Nombre del usuario",
@@ -224,7 +241,7 @@ Ejemplo de respuesta:
 
 ### 3. Obtener usuario por ID
 
-```http
+```
 GET /api/usuarios/{id}
 Authorization: Bearer <access-token>
 ```
@@ -236,7 +253,7 @@ Respuestas principales:
 
 ### 4. Crear usuario
 
-```http
+```
 POST /api/usuarios
 Authorization: Bearer <access-token>
 Content-Type: application/json
@@ -244,7 +261,7 @@ Content-Type: application/json
 
 Ejemplo de body:
 
-```json
+```
 {
   "entraObjectId": "44444444-4444-4444-4444-444444444444",
   "nombre": "Nuevo Usuario",
@@ -257,15 +274,16 @@ Ejemplo de body:
 
 Respuesta esperada:
 
-```text
+```
 201 Created
+
 ```
 
 > Este endpoint crea un usuario dentro de la base de datos de Pedidos360. No corresponde a la creación de una cuenta de autenticación en Microsoft Entra ID.
 
 ### 5. Actualizar usuario
 
-```http
+```
 PUT /api/usuarios/{id}
 Authorization: Bearer <access-token>
 Content-Type: application/json
@@ -278,7 +296,7 @@ Respuestas principales:
 
 ### 6. Eliminar usuario
 
-```http
+```
 DELETE /api/usuarios/{id}
 Authorization: Bearer <access-token>
 ```
@@ -290,7 +308,7 @@ Respuestas principales:
 
 ### 7. Health check
 
-```http
+```
 GET /actuator/health
 ```
 
@@ -298,7 +316,7 @@ El endpoint de health check se encuentra habilitado mediante Spring Boot Actuato
 
 Una respuesta normal cuando el servicio se encuentra disponible es:
 
-```json
+```
 {
   "status": "UP"
 }
@@ -308,15 +326,16 @@ Una respuesta normal cuando el servicio se encuentra disponible es:
 
 La configuración se encuentra en:
 
-```text
+```
 src/main/java/cl/duoc/pedidos360/usuarios/config/SecurityConfig.java
+
 ```
 
 Usuarios Service funciona como un OAuth2 Resource Server y utiliza JWT para proteger la API.
 
 ### Propiedades principales
 
-```properties
+```
 spring.security.oauth2.resourceserver.jwt.issuer-uri=https://login.microsoftonline.com/3441157d-ea5c-483f-a66d-e45c3ed7f9da/v2.0
 pedidos360.security.jwt.audience=5582b6c4-7ecd-4bed-9337-ba3f1f8e58e5
 ```
@@ -350,20 +369,22 @@ Usuarios Service incorpora configuración CORS para permitir la comunicación de
 
 Los métodos HTTP permitidos incluyen:
 
-```text
+```
 GET
 POST
 PUT
 DELETE
 OPTIONS
+
 ```
 
 Los encabezados permitidos incluyen:
 
-```text
+```
 Authorization
 Content-Type
 Accept
+
 ```
 
 ## Microsoft Entra ID
@@ -374,15 +395,16 @@ La autenticación se delega a Microsoft Entra ID.
 
 El frontend Angular inicia sesión mediante MSAL y solicita el scope:
 
-```text
+```
 api://5582b6c4-7ecd-4bed-9337-ba3f1f8e58e5/access_as_user
+
 ```
 
 Microsoft Entra ID emite el access token y Usuarios Service valida posteriormente el JWT antes de permitir el acceso a los endpoints protegidos.
 
 La creación de registros mediante:
 
-```http
+```
 POST /api/usuarios
 ```
 
@@ -397,46 +419,109 @@ Antes de ejecutar el proyecto se necesita:
 - variables de entorno de conexión a la base de datos
 - acceso de red a Microsoft Entra ID para la validación del JWT
 - Maven o Maven Wrapper incluido en el proyecto
+- RabbitMQ accesible desde el microservicio para consumir eventos
 
 ## Ejecución local
 
 Desde la carpeta:
 
-```text
+```
 Usuarios-Service-Pedidos360
+
 ```
 
 ### Windows PowerShell
 
-```powershell
+```
 .\mvnw.cmd spring-boot:run
 ```
 
 ### Linux o macOS
 
-```bash
+```
 ./mvnw spring-boot:run
 ```
 
 La aplicación queda disponible en:
 
-```text
+```
 http://localhost:8081
+
 ```
 
 ## Compilación
 
 ### Windows
 
-```powershell
+```
 .\mvnw.cmd clean package
 ```
 
 ### Linux o macOS
 
-```bash
+```
 ./mvnw clean package
 ```
+
+## Integración asíncrona con RabbitMQ
+
+Usuarios Service actúa como **consumidor** de eventos de creación de pedidos emitidos por Pedidos Service. Esta integración permite procesar notificaciones relacionadas con pedidos sin acoplar directamente ambos microservicios mediante llamadas HTTP.
+
+### Componentes implementados
+
+- `config/RabbitUsuariosConfig.java`: configuración de la infraestructura RabbitMQ utilizada por Usuarios Service.
+- `messaging/dto/PedidoCreadoEvent.java`: estructura del evento compartido conceptualmente con Pedidos Service.
+- `consumer/PedidoCreadoListener.java`: escucha la cola configurada y procesa los eventos.
+
+El evento incluye campos como `eventoId`, `pedidoId`, `cliente`, `producto`, `cantidad`, `estado` y `fechaCreacion`.
+
+### Colas y flujo de procesamiento
+
+| Recurso | Nombre |
+| --- | --- |
+| Exchange de eventos | `pedidos360.events` |
+| Routing key de creación | `pedido.creado` |
+| Cola de Usuarios | `usuarios.pedido-creado.q` |
+| Cola de mensajes fallidos | `usuarios.pedido-creado.dlq` |
+
+1. Pedidos Service publica un evento `PedidoCreadoEvent` en RabbitMQ.
+2. RabbitMQ enruta el mensaje a las colas de los microservicios suscritos.
+3. `PedidoCreadoListener` recibe el evento desde `usuarios.pedido-creado.q`.
+4. El listener valida los campos esenciales y registra una notificación simulada en los logs.
+5. Cuando el procesamiento es exitoso, ejecuta `basicAck(deliveryTag, false)`.
+6. Si ocurre una excepción durante el procesamiento, ejecuta `basicNack(deliveryTag, false, false)`; la configuración de dead-lettering dirige el mensaje rechazado a `usuarios.pedido-creado.dlq`.
+
+**Importante:** la notificación de Usuarios Service es actualmente **simulada mediante logs**; no se envían correos ni mensajes reales. El listener utiliza rechazo sin reencolar (`requeue=false`), no un bucle de reintentos dentro de este componente.
+
+### Verificación local de RabbitMQ
+
+En el entorno de desarrollo se utiliza un contenedor Docker llamado `pedidos360-rabbitmq`. Para iniciarlo, si ya existe:
+
+```powershell
+docker start pedidos360-rabbitmq
+```
+
+Para revisar las colas y sus consumidores:
+
+```powershell
+docker exec pedidos360-rabbitmq rabbitmqctl list_queues name messages consumers
+```
+
+La interfaz de administración de RabbitMQ está disponible localmente en `http://localhost:15672` cuando el contenedor expone ese puerto.
+
+### Pruebas unitarias del consumidor
+
+La clase `src/test/java/cl/duoc/pedidos360/usuarios/consumer/PedidoCreadoListenerTest.java` utiliza **JUnit 5 y Mockito** para comprobar el comportamiento del listener sin depender de un broker real.
+
+Para ejecutar específicamente estas pruebas desde la raíz del repositorio:
+
+```powershell
+mvn "-Dtest=PedidoCreadoListenerTest" test
+```
+
+En la validación local realizada se ejecutaron **3 pruebas**, sin fallos ni errores (`BUILD SUCCESS`). También se comprobó manualmente la recepción de un evento válido con ACK y el envío de un evento inválido a la DLQ.
+
+---
 
 ## Integración con el frontend
 
@@ -444,14 +529,16 @@ En el entorno desplegado, el frontend de Pedidos360 consume Usuarios Service a t
 
 La URL configurada actualmente en el frontend utiliza:
 
-```text
+```
 /api/usuarios
+
 ```
 
 También consume:
 
-```text
+```
 /api/usuarios/me
+
 ```
 
 para obtener la información del usuario autenticado.
@@ -471,3 +558,5 @@ El flujo principal de Usuarios Service es:
 7. `UsuarioService` procesa la operación;
 8. `UsuarioRepository` accede a MySQL cuando corresponde;
 9. el servicio devuelve la respuesta REST en formato JSON.
+
+De forma independiente, Usuarios Service escucha los eventos de creación de pedidos publicados en RabbitMQ y confirma o rechaza su procesamiento mediante ACK/NACK.
