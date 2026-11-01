@@ -1,5 +1,6 @@
 package cl.duoc.pedidos360.usuarios.service;
 
+import cl.duoc.pedidos360.usuarios.messaging.producer.UsuarioKafkaProducer;
 import cl.duoc.pedidos360.usuarios.model.Usuario;
 import cl.duoc.pedidos360.usuarios.repository.UsuarioRepository;
 import org.springframework.stereotype.Service;
@@ -11,9 +12,11 @@ import java.util.Optional;
 public class UsuarioService {
 
     private final UsuarioRepository usuarioRepository;
+    private final UsuarioKafkaProducer usuarioKafkaProducer;
 
-    public UsuarioService(UsuarioRepository usuarioRepository) {
+    public UsuarioService(UsuarioRepository usuarioRepository, UsuarioKafkaProducer usuarioKafkaProducer) {
         this.usuarioRepository = usuarioRepository;
+        this.usuarioKafkaProducer = usuarioKafkaProducer;
     }
 
     public List<Usuario> listarTodos() {
@@ -36,7 +39,9 @@ public class UsuarioService {
 
     public Usuario crear(Usuario usuario) {
         usuario.setId(null);
-        return usuarioRepository.save(usuario);
+        Usuario usuarioCreado = usuarioRepository.save(usuario);
+        usuarioKafkaProducer.publicarUsuarioRegistrado(usuarioCreado);
+        return usuarioCreado;
     }
 
     public Optional<Usuario> actualizar(Long id, Usuario usuario) {
