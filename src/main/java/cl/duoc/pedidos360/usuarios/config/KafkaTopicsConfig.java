@@ -1,11 +1,16 @@
 package cl.duoc.pedidos360.usuarios.config;
 
+import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.config.TopicConfig;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.core.KafkaAdmin;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Declaración de los tópicos Kafka del sistema. Spring (KafkaAdmin) los crea al iniciar
@@ -14,6 +19,9 @@ import org.springframework.kafka.config.TopicBuilder;
  */
 @Configuration
 public class KafkaTopicsConfig {
+
+    @Value("${spring.kafka.bootstrap-servers}")
+    private String bootstrapServers;
 
     @Value("${pedidos360.kafka.topics.pedidos-creados}")
     private String pedidosCreados;
@@ -35,6 +43,14 @@ public class KafkaTopicsConfig {
 
     @Value("${pedidos360.kafka.topic-defaults.dlt-retention-ms:2592000000}")
     private String dltRetentionMs;
+
+    /** Procesa los beans NewTopic al iniciar y crea los tópicos que no existan. */
+    @Bean
+    public KafkaAdmin kafkaAdmin() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        return new KafkaAdmin(props);
+    }
 
     @Bean
     public NewTopic pedidosCreadosTopic() {
